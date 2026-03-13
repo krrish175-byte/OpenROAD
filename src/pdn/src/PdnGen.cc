@@ -20,7 +20,9 @@
 #include "gui/gui.h"
 #include "odb/db.h"
 #include "odb/dbObject.h"
+#include "odb/dbShape.h"
 #include "odb/dbTransform.h"
+#include "odb/dbTypes.h"
 #include "power_cells.h"
 #include "renderer.h"
 #include "rings.h"
@@ -33,6 +35,14 @@
 #include "via_repair.h"
 
 namespace pdn {
+
+struct NetComp
+{
+  bool operator()(const odb::dbNet* a, const odb::dbNet* b) const
+  {
+    return a->getId() < b->getId();
+  }
+};
 
 using utl::Logger;
 
@@ -744,9 +754,17 @@ void PdnGen::writeToDb(bool add_pins, const std::string& report_file) const
     }
   }
 
+  std::vector<odb::dbNet*> nets_to_create;
   for (auto& [net, swire] : net_map) {
+    nets_to_create.push_back(net);
+  }
+  std::ranges::sort(nets_to_create, [](odb::dbNet* a, odb::dbNet* b) {
+    return a->getId() < b->getId();
+  });
+
+  for (auto* net : nets_to_create) {
     net->setSpecial();
-    swire = odb::dbSWire::create(net, odb::dbWireType::ROUTED);
+    net_map[net] = odb::dbSWire::create(net, odb::dbWireType::ROUTED);
   }
 
   // collect all the SWires from the block
@@ -763,7 +781,7 @@ void PdnGen::writeToDb(bool add_pins, const std::string& report_file) const
   for (auto& [net, swire] : net_map) {
     for (auto* bterm : net->getBTerms()) {
       auto bpins = bterm->getBPins();
-      std::set<odb::dbBPin*> pins(bpins.begin(), bpins.end());
+      std::vector<odb::dbBPin*> pins(bpins.begin(), bpins.end());
       for (auto* bpin : pins) {
         if (!bpin->getPlacementStatus().isFixed()) {
           odb::dbBPin::destroy(bpin);
@@ -783,6 +801,9 @@ void PdnGen::writeToDb(bool add_pins, const std::string& report_file) const
   }
 
   // Cleanup floating shapes due to failed vias
+  std::vector<odb::dbBox*> boxes_to_destroy;
+  std::vector<odb::dbSBox*> sboxes_to_destroy;
+
   for (const auto& [shape, db_shapes] : shape_map) {
     if (!shape->isLocked() && !shape->hasInternalConnections()) {
       for (odb::dbBox* db_box : db_shapes) {
@@ -790,12 +811,26 @@ void PdnGen::writeToDb(bool add_pins, const std::string& report_file) const
           continue;
         }
         if (db_box->getObjectType() == odb::dbObjectType::dbSBoxObj) {
-          odb::dbSBox::destroy((odb::dbSBox*) db_box);
+          sboxes_to_destroy.push_back((odb::dbSBox*) db_box);
         } else {
-          odb::dbBox::destroy(db_box);
+          boxes_to_destroy.push_back(db_box);
         }
       }
     }
+  }
+
+  std::ranges::sort(sboxes_to_destroy, [](odb::dbSBox* a, odb::dbSBox* b) {
+    return a->getId() < b->getId();
+  });
+  for (auto* sbox : sboxes_to_destroy) {
+    odb::dbSBox::destroy(sbox);
+  }
+
+  std::ranges::sort(boxes_to_destroy, [](odb::dbBox* a, odb::dbBox* b) {
+    return a->getId() < b->getId();
+  });
+  for (auto* box : boxes_to_destroy) {
+    odb::dbBox::destroy(box);
   }
 
   // Remove empty swires
@@ -831,7 +866,7 @@ void PdnGen::ripUp(odb::dbNet* net)
 {
   if (net == nullptr) {
     resetShapes();
-    std::set<odb::dbNet*> nets;
+    std::set<odb::dbNet*, NetComp> nets;
     ensureCoreDomain();
     for (auto* domain : getDomains()) {
       for (auto* net : domain->getNets()) {
@@ -855,9 +890,9 @@ void PdnGen::ripUp(odb::dbNet* net)
   Shape::ShapeTreeMap net_shapes = Shape::convertVectorToTree(net_shapes_vec);
 
   // remove bterms that connect to swires
-  std::set<odb::dbBTerm*> terms;
+  std::vector<odb::dbBTerm*> terms;
   for (auto* bterm : net->getBTerms()) {
-    std::set<odb::dbBPin*> pins;
+    std::vector<odb::dbBPin*> pins;
     for (auto* pin : bterm->getBPins()) {
       bool remove = false;
       for (auto* box : pin->getBoxes()) {
@@ -877,14 +912,14 @@ void PdnGen::ripUp(odb::dbNet* net)
         }
       }
       if (remove) {
-        pins.insert(pin);
+        pins.push_back(pin);
       }
     }
     for (auto* pin : pins) {
       odb::dbBPin::destroy(pin);
     }
     if (bterm->getBPins().empty()) {
-      terms.insert(bterm);
+      terms.push_back(bterm);
     }
   }
   for (auto* term : terms) {

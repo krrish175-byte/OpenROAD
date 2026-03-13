@@ -56,8 +56,26 @@ void ViaRepair::repair()
   using Polygon90Set = boost::polygon::polygon_90_set_data<int>;
   using Pt = Polygon90::point_type;
 
-  std::map<odb::dbTechLayer*, std::set<odb::dbSBox*>> tech_vias_to_remove;
-  std::map<odb::dbTechLayer*, std::set<odb::dbSBox*>> block_vias_to_remove;
+  struct TechLayerComp
+  {
+    bool operator()(const odb::dbTechLayer* a, const odb::dbTechLayer* b) const
+    {
+      return a->getNumber() < b->getNumber();
+    }
+  };
+
+  struct SBoxComp
+  {
+    bool operator()(const odb::dbSBox* a, const odb::dbSBox* b) const
+    {
+      return a->getId() < b->getId();
+    }
+  };
+
+  std::map<odb::dbTechLayer*, std::set<odb::dbSBox*, SBoxComp>, TechLayerComp>
+      tech_vias_to_remove;
+  std::map<odb::dbTechLayer*, std::set<odb::dbSBox*, SBoxComp>, TechLayerComp>
+      block_vias_to_remove;
   for (const auto& [layer, layer_obs] : combined_obs) {
     Polygon90Set layer_obstructions;
     for (const auto& obs : layer_obs) {
